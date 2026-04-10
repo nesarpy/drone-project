@@ -4,10 +4,10 @@
 #include <RF24.h>
 #include <Servo.h>
 
-// ================= LED =================
+//LED
 #define ARM_LED 2
 
-// ================= MPU =================
+//MPU
 MPU6050 imu;
 
 int16_t ax, ay, az, gx, gy, gz;
@@ -25,12 +25,20 @@ bool calibrated = false;
 
 unsigned long prevTime;
 float dt;
-float alpha = 0.98;
+float alpha = 0.945;
 
-// ================= NRF =================
+//Gyro LPF
+static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
+float gyroAlpha = 0.75;
+
+//Acc LPF
+static float accX_f = 0, accY_f = 0, accZ_f = 0;
+float accAlpha = 0.85;
+
+//NRF
 RF24 radio(7, 8);
-const byte txAddress[6] = "00001";  // controller → drone
-const byte rxAddress[6] = "00002";  // drone → controller
+const byte txAddress[6] = "00001";  // controller to drone
+const byte rxAddress[6] = "00002";  // drone to controller
 
 struct DataPacket {
   int16_t throttle;
@@ -56,16 +64,14 @@ DataPacket lastValidData = {512, 512, 512, 512};
 unsigned long lastReceiveTime = 0;
 const unsigned long FAILSAFE_TIMEOUT = 100;
 
-// ================= TELEMETRY TIMER =================
 unsigned long lastTelemetryTime = 0;
 
-// ================= MOTORS =================
 Servo FL, FR, BL, BR;
 
-// ================= PID =================
+//PID
 float Kp = 1.1;
 float Ki = 0;
-float Kd = 0.25;
+float Kd = 0;
 
 float pitchError, rollError;
 float pitchPrevError = 0, rollPrevError = 0;
@@ -73,14 +79,14 @@ float pitchIntegral = 0, rollIntegral = 0;
 
 float pitchPID, rollPID;
 
-// ================= YAW =================
+//YAW
 float yawRate, targetYawRate, yawPID;
 float KpYaw = 1.0;
 
-// ================= ARMING =================
+//ARMING
 bool armed = false;
 
-// ================= FUNCTIONS =================
+//FUNCTIONS
 bool isValid(DataPacket d) {
   if (d.throttle < 0 || d.throttle > 1023) return false;
   if (d.yaw < 0 || d.yaw > 1023) return false;
@@ -93,7 +99,6 @@ bool isValid(DataPacket d) {
   return true;
 }
 
-// ================= SETUP =================
 void setup() {
   pinMode(ARM_LED, OUTPUT);
   digitalWrite(ARM_LED, LOW);
@@ -127,19 +132,40 @@ void setup() {
   radio.enableAckPayload();
   radio.enableDynamicPayloads();
   radio.startListening();
+
+  float pitchSum = 0, rollSum = 0;
+  int samples = 500;
+
+  for (int i = 0; i < samples; i++) {
+    imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+    accX = ax / 16384.0;
+    accY = ay / 16384.0;
+    accZ = az / 16384.0;
+
+    pitchAcc = atan2(-accX, accZ) * 180 / PI;
+    rollAcc  = atan2(accY, accZ) * 180 / PI;
+
+    pitchSum += pitchAcc;
+    rollSum  += rollAcc;
+
+    delay(5);
+  }
+
+  pitchOffset = pitchSum / samples;
+  rollOffset  = rollSum / samples;
 }
 
-// ================= LOOP =================
 void loop() {
 
-  // ===== TIME =====
+  //TIME
   unsigned long currentTime = millis();
   dt = (currentTime - prevTime) / 1000.0;
   prevTime = currentTime;
   if (dt <= 0) dt = 0.001;
-  dt = constrain(dt, 0.001, 0.02);
+  dt = max(dt, 0.001);
 
-  // ===== MPU =====
+  //MPU
   imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
   accX = ax / 16384.0;
@@ -150,22 +176,40 @@ void loop() {
   gyroY = gy / 131.0;
   gyroZ = gz / 131.0;
 
+  //Gyro LPF
+  gyroX_f = gyroAlpha * gyroX_f + (1 - gyroAlpha) * gyroX;
+  gyroY_f = gyroAlpha * gyroY_f + (1 - gyroAlpha) * gyroY;
+  gyroZ_f = gyroAlpha * gyroZ_f + (1 - gyroAlpha) * gyroZ;
+
+  //Acc LPF
+  accX_f = accAlpha * accX_f + (1 - accAlpha) * accX;
+  accY_f = accAlpha * accY_f + (1 - accAlpha) * accY;
+  accZ_f = accAlpha * accZ_f + (1 - accAlpha) * accZ;
+
+  gyroX = gyroX_f;
+  gyroY = gyroY_f;
+  gyroZ = gyroZ_f;
+
+  accX = accX_f;
+  accY = accY_f;
+  accZ = accZ_f;
+
+
   pitchAcc = atan2(-accX, accZ) * 180 / PI;
   rollAcc  = atan2(accY, accZ) * 180 / PI;
+
+  if (abs(pitchAcc) > 45 || abs(rollAcc) > 45) {
+    pitchAcc = pitch;
+    rollAcc  = roll;
+  }
 
   pitch = alpha * (pitch + gyroY * dt) + (1 - alpha) * pitchAcc;
   roll  = alpha * (roll  + gyroX * dt) + (1 - alpha) * rollAcc;
 
-  if (!calibrated) {
-    pitchOffset = pitch;
-    rollOffset  = roll;
-    calibrated  = true;
-  }
-
   float pitchFinal = pitch - pitchOffset;
   float rollFinal  = roll  - rollOffset;
 
-  // ===== NRF RECEIVE =====
+  //NRF RECEIVE
   if (radio.available()) {
     radio.read(&data, sizeof(data));
 
@@ -179,7 +223,7 @@ void loop() {
     lastValidData = {0, 512, 512, 512};
   }
 
-  // ===== ARMING =====
+  //ARMING
   static unsigned long armStartTime = 0;
 
   if (lastValidData.throttle < 50 && lastValidData.yaw > 900) {
@@ -195,7 +239,7 @@ void loop() {
 
   digitalWrite(ARM_LED, armed ? HIGH : LOW);
 
-  // ===== INPUT =====
+  //INPUT
   int throttle = map(lastValidData.throttle, 0, 1023, 1000, 2000);
   if (armed && throttle < 1050) throttle = 1050;
 
@@ -203,7 +247,7 @@ void loop() {
   float targetRoll  = map(lastValidData.roll,  0, 1023, -30, 30);
   targetYawRate     = map(lastValidData.yaw,   0, 1023, -150, 150);
 
-  // ===== PID =====
+  //PID
   pitchError = targetPitch - pitchFinal;
   rollError  = targetRoll  - rollFinal;
   
@@ -231,9 +275,10 @@ void loop() {
   pitchPrevError = pitchError;
   rollPrevError  = rollError;
 
-  // ===== YAW =====
+  //YAW
   yawRate = gyroZ;
   float yawError = targetYawRate - yawRate;
+  if (abs(yawError) < 5) yawError = 0;
   yawPID = KpYaw * yawError;
 
   if (throttle <= 1050) {
@@ -245,7 +290,7 @@ void loop() {
   rollPID  = constrain(rollPID,  -200, 200);
   yawPID   = constrain(yawPID,   -150, 150);
 
-  // ===== MIXING =====
+  //MIXING
   int m1 = constrain(throttle - pitchPID - rollPID + yawPID, 1000, 2000);
   int m2 = constrain(throttle - pitchPID + rollPID - yawPID, 1000, 2000);
   int m3 = constrain(throttle + pitchPID - rollPID - yawPID + 30, 1000, 2000); // different esc
@@ -258,7 +303,7 @@ void loop() {
   BL.writeMicroseconds(m3);
   BR.writeMicroseconds(m4);
 
-  // ===== TELEMETRY =====
+  //TELEMETRY
   if (millis() - lastTelemetryTime > 20) {
 
     telemetry.armed = armed;

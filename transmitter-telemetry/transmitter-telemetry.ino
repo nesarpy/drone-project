@@ -2,8 +2,8 @@
 #include <RF24.h>
 
 RF24 radio(7, 8);
-const byte txAddress[6] = "00001";  // controller → drone
-const byte rxAddress[6] = "00002";  // drone → controller
+const byte txAddress[6] = "00001";  // controller to drone
+const byte rxAddress[6] = "00002";  // drone to controller
 
 int LjoyX = A0;
 int LjoyY = A2;
@@ -48,18 +48,18 @@ void setup() {
 
 void loop() {
 
-  // ===== READ CONTROLS =====
+  //READ CONTROLS
   data.throttle = 1023 - analogRead(LjoyY);
   data.yaw      = 1023 - analogRead(LjoyX);
   data.pitch    = analogRead(RjoyY);
   data.roll     = 1023 - analogRead(RjoyX);
 
-  // ===== SEND CONTROL =====
+  //SEND CONTROL
   radio.stopListening();
   bool success = radio.write(&data, sizeof(data));
   digitalWrite(LED, success);
 
-  // ===== RECEIVE TELEMETRY =====
+  //RECEIVE TELEMETRY
   radio.startListening();
 
   unsigned long start = millis();

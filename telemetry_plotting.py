@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from collections import deque
 import csv
 import time
+from datetime import datetime
 
 # ===== SERIAL =====
 PORT = "COM18"
@@ -11,8 +12,7 @@ BAUD = 250000
 ser = serial.Serial(PORT, BAUD, timeout=0.01)
 
 # ===== LOGGING SETUP =====
-start_time = time.time()
-filename = f"logs/flight_log_{int(start_time)}.csv"
+filename = f"logs/flight_log_{datetime.now().strftime('%d-%m-%Y__%H%M')}.csv"
 
 file = open(filename, mode="w", newline="")
 writer = csv.writer(file)
@@ -103,7 +103,7 @@ try:
         throttle, pitch, roll, yaw, m1, m2, m3, m4 = result
 
         # ===== LOGGING =====
-        current_time = int((time.time() - start_time) * 1000)
+        current_time = int(time.time() * 1000)
 
         writer.writerow([
             current_time,
