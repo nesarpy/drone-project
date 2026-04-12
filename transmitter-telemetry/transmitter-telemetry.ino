@@ -36,6 +36,7 @@ void setup() {
   pinMode(LED, OUTPUT);
 
   radio.begin();
+  radio.setAutoAck(true);
   radio.openWritingPipe(txAddress);      // send controls
   radio.openReadingPipe(1, rxAddress);   // receive telemetry
   radio.setChannel(108);
@@ -48,46 +49,37 @@ void setup() {
 
 void loop() {
 
-  //READ CONTROLS
+  // READ CONTROLS
   data.throttle = 1023 - analogRead(LjoyY);
   data.yaw      = 1023 - analogRead(LjoyX);
   data.pitch    = analogRead(RjoyY);
   data.roll     = 1023 - analogRead(RjoyX);
 
-  //SEND CONTROL
-  radio.stopListening();
+  // SEND CONTROL
   bool success = radio.write(&data, sizeof(data));
   digitalWrite(LED, success);
 
-  //RECEIVE TELEMETRY
-  radio.startListening();
+  // RECEIVE TELEMETRY (from ACK)
+  if (radio.isAckPayloadAvailable()) {
+    radio.read(&telemetry, sizeof(telemetry));
 
-  unsigned long start = millis();
-  while (millis() - start < 5) {  // small window
+    static unsigned long lastPrint = 0;
 
-radio.stopListening();
+    if (millis() - lastPrint > 20) {
+      Serial.print("ARM: "); Serial.print(telemetry.armed);
+      Serial.print(" | T: "); Serial.print(telemetry.throttle);
+      Serial.print(" | P: "); Serial.print(telemetry.pitch);
+      Serial.print(" | R: "); Serial.print(telemetry.roll);
+      Serial.print(" | Y: "); Serial.print(telemetry.yawRate);
+      Serial.print(" | M: ");
+      Serial.print(telemetry.m1); Serial.print(" ");
+      Serial.print(telemetry.m2); Serial.print(" ");
+      Serial.print(telemetry.m3); Serial.print(" ");
+      Serial.println(telemetry.m4);
 
-bool success = radio.write(&data, sizeof(data));
-
-    if (radio.isAckPayloadAvailable()) {
-      radio.read(&telemetry, sizeof(telemetry));
-      
-      static unsigned long lastPrint = 0;
-
-      if (millis() - lastPrint > 20) {
-        Serial.print("ARM: "); Serial.print(telemetry.armed);
-        Serial.print(" | T: "); Serial.print(telemetry.throttle);
-        Serial.print(" | P: "); Serial.print(telemetry.pitch);
-        Serial.print(" | R: "); Serial.print(telemetry.roll);
-        Serial.print(" | Y: "); Serial.print(telemetry.yawRate);
-        Serial.print(" | M: ");
-        Serial.print(telemetry.m1); Serial.print(" ");
-        Serial.print(telemetry.m2); Serial.print(" ");
-        Serial.print(telemetry.m3); Serial.print(" ");
-        Serial.println(telemetry.m4);
-        
-        lastPrint = millis();
-      }
+      lastPrint = millis();
     }
   }
+
+  delay(5);
 }
