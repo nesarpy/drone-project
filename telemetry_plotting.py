@@ -10,12 +10,12 @@ import queue
 from datetime import datetime
 
 # ===== CONFIG =====
-PORT             = "COM18"
-BAUD             = 250000
-MAX_POINTS       = 100
-FLUSH_EVERY      = 25    # rows before CSV flush
-RENDER_INTERVAL  = 0.05  # seconds between plot redraws (~20 fps)
-MOTOR_WARN_DELTA = 150   # µs deviation from motor average to trigger warning
+PORT = "COM18"
+BAUD = 250000
+MAX_POINTS = 100
+FLUSH_EVERY = 25 # rows before CSV flush
+RENDER_INTERVAL = 0.05 # seconds between plot redraws (~20 fps)
+MOTOR_WARN_DELTA = 150 # µs deviation from motor average to trigger warning
 
 # ===== SERIAL =====
 ser = serial.Serial(PORT, BAUD, timeout=0.1)
@@ -23,8 +23,8 @@ ser = serial.Serial(PORT, BAUD, timeout=0.1)
 # ===== LOGGING =====
 os.makedirs("logs", exist_ok=True)
 filename = f"logs/flight_log_{datetime.now().strftime('%d-%m-%Y__%H%M')}.csv"
-file     = open(filename, mode="w", newline="")
-writer   = csv.writer(file)
+file = open(filename, mode="w", newline="")
+writer = csv.writer(file)
 writer.writerow(["time_ms", "throttle", "pitch", "roll", "yaw", "m1", "m2", "m3", "m4"])
 print(f"Logging to {filename}")
 
@@ -34,9 +34,9 @@ data_queue = queue.Queue()
 stop_event = threading.Event()
 
 # ===== DATA BUFFERS (main thread only) =====
-pitch_data    = deque(maxlen=MAX_POINTS)
-roll_data     = deque(maxlen=MAX_POINTS)
-yaw_data      = deque(maxlen=MAX_POINTS)
+pitch_data = deque(maxlen=MAX_POINTS)
+roll_data = deque(maxlen=MAX_POINTS)
+yaw_data = deque(maxlen=MAX_POINTS)
 throttle_data = deque(maxlen=MAX_POINTS)
 m1_data = deque(maxlen=MAX_POINTS)
 m2_data = deque(maxlen=MAX_POINTS)
@@ -46,12 +46,12 @@ m4_data = deque(maxlen=MAX_POINTS)
 # ===== PARSER =====
 def parse_line(line: str):
     try:
-        parts    = line.split("|")
+        parts = line.split("|")
         throttle = int(parts[1].split(":")[1])
-        pitch    = float(parts[2].split(":")[1])
-        roll     = float(parts[3].split(":")[1])
-        yaw      = float(parts[4].split(":")[1])
-        motors   = parts[5].split(":")[1].strip().split()
+        pitch = float(parts[2].split(":")[1])
+        roll = float(parts[3].split(":")[1])
+        yaw = float(parts[4].split(":")[1])
+        motors = parts[5].split(":")[1].strip().split()
         m1, m2, m3, m4 = map(int, motors)
         return throttle, pitch, roll, yaw, m1, m2, m3, m4
     except (IndexError, ValueError):
