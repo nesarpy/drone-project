@@ -21,7 +21,6 @@ float pitchAcc, rollAcc;
 // Calibration offsets
 float pitchOffset = 0;
 float rollOffset = 0;
-bool calibrated = false;
 
 unsigned long prevTime;
 float dt;
@@ -29,11 +28,11 @@ float alpha = 0.945;
 
 //Gyro LPF
 static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
-float gyroAlpha = 0.75;
+float gyroAlpha = 0.65;
 
 //Acc LPF
 static float accX_f = 0, accY_f = 0, accZ_f = 0;
-float accAlpha = 0.85;
+float accAlpha = 0.65;
 
 //NRF
 RF24 radio(7, 8);
@@ -104,11 +103,14 @@ void setup() {
   digitalWrite(ARM_LED, LOW);
 
   Wire.begin();
+  Wire.setClock(400000);
   imu.initialize();
-
+  
   if (!imu.testConnection()) {
     while (1);
   }
+  
+  imu.setDLPFMode(MPU6050_DLPF_BW_42);
 
   prevTime = millis();
 
@@ -124,6 +126,7 @@ void setup() {
   delay(3000);
 
   radio.begin();
+  radio.setAutoAck(true);
   radio.openReadingPipe(0, txAddress);   // receive controls
   radio.openWritingPipe(rxAddress);      // send telemetry
   radio.setChannel(108);
