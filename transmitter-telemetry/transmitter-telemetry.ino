@@ -11,6 +11,7 @@ int RjoyX = A4;
 int RjoyY = A6;
 
 int LED = 4;
+int BATLED = 9;
 
 struct DataPacket {
   int16_t throttle;
@@ -26,6 +27,7 @@ struct TelemetryPacket {
   float roll;
   float yawRate;
   int m1, m2, m3, m4;
+  float batV;
 };
 
 DataPacket data;
@@ -33,7 +35,9 @@ TelemetryPacket telemetry;
 
 void setup() {
   Serial.begin(250000);
+
   pinMode(LED, OUTPUT);
+  pinMode(BATLED, OUTPUT);
 
   radio.begin();
   radio.setAutoAck(true);
@@ -57,7 +61,7 @@ void loop() {
 
   // SEND CONTROL
   bool success = radio.write(&data, sizeof(data));
-  digitalWrite(LED, success);
+  analogWrite(LED, success*30); //the led is too bright at full signal
 
   // RECEIVE TELEMETRY (from ACK)
   if (radio.isAckPayloadAvailable()) {
@@ -75,9 +79,16 @@ void loop() {
       Serial.print(telemetry.m1); Serial.print(" ");
       Serial.print(telemetry.m2); Serial.print(" ");
       Serial.print(telemetry.m3); Serial.print(" ");
-      Serial.println(telemetry.m4);
+      Serial.print(telemetry.m4);
+      Serial.print(" | BatV: ");
+      Serial.println(telemetry.batV);
 
       lastPrint = millis();
+      if (telemetry.batV < 11.0 && success) {
+        digitalWrite(BATLED, 1);
+      } else {
+        digitalWrite(BATLED, 0);
+      }
     }
   }
 

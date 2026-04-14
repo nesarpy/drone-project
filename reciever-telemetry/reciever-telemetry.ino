@@ -7,6 +7,10 @@
 //LED
 #define ARM_LED 2
 
+//BATTERY
+float batV = 0;
+static float batV_filtered = 0;
+
 //MPU
 MPU6050 imu;
 
@@ -53,6 +57,7 @@ struct TelemetryPacket {
   float roll;
   float yawRate;
   int m1, m2, m3, m4;
+  float batV;
 };
 
 TelemetryPacket telemetry;
@@ -66,11 +71,12 @@ const unsigned long FAILSAFE_TIMEOUT = 100;
 unsigned long lastTelemetryTime = 0;
 
 Servo FL, FR, BL, BR;
+float trim = 0;
 
 //PID
-float Kp = 1.1;
-float Ki = 0;
-float Kd = 0;
+float Kp = 1.4;
+float Ki = 0.01;
+float Kd = 0.18;
 
 float pitchError, rollError;
 float pitchPrevError = 0, rollPrevError = 0;
@@ -80,7 +86,7 @@ float pitchPID, rollPID;
 
 //YAW
 float yawRate, targetYawRate, yawPID;
-float KpYaw = 1.0;
+float KpYaw = 1.7;
 
 //ARMING
 bool armed = false;
@@ -147,7 +153,7 @@ void setup() {
     accZ = az / 16384.0;
 
     pitchAcc = atan2(-accX, accZ) * 180 / PI;
-    rollAcc  = atan2(accY, accZ) * 180 / PI;
+    rollAcc  = atan2(-accY, accZ) * 180 / PI;
 
     pitchSum += pitchAcc;
     rollSum  += rollAcc;
@@ -199,7 +205,7 @@ void loop() {
 
 
   pitchAcc = atan2(-accX, accZ) * 180 / PI;
-  rollAcc  = atan2(accY, accZ) * 180 / PI;
+  rollAcc  = atan2(-accY, accZ) * 180 / PI;
 
   if (abs(pitchAcc) > 45 || abs(rollAcc) > 45) {
     pitchAcc = pitch;
@@ -244,11 +250,15 @@ void loop() {
 
   //INPUT
   int throttle = map(lastValidData.throttle, 0, 1023, 1000, 2000);
-  if (armed && throttle < 1050) throttle = 1050;
+  if (armed && throttle < 1070) throttle = 1070;
 
   float targetPitch = map(lastValidData.pitch, 0, 1023, -30, 30);
   float targetRoll  = map(lastValidData.roll,  0, 1023, -30, 30);
   targetYawRate     = map(lastValidData.yaw,   0, 1023, -150, 150);
+  
+  //deadbands
+  if (abs(targetRoll) < 2) targetRoll = 0;
+  if (abs(targetPitch) < 2) targetPitch = 0;
 
   //PID
   pitchError = targetPitch - pitchFinal;
@@ -284,7 +294,7 @@ void loop() {
   if (abs(yawError) < 5) yawError = 0;
   yawPID = KpYaw * yawError;
 
-  if (throttle <= 1050) {
+  if (throttle <= 1070) {
     pitchPID = rollPID = yawPID = 0;
     pitchIntegral = rollIntegral = 0;
   }
@@ -294,10 +304,20 @@ void loop() {
   yawPID   = constrain(yawPID,   -150, 150);
 
   //MIXING
-  int m1 = constrain(throttle - pitchPID - rollPID + yawPID, 1000, 2000);
-  int m2 = constrain(throttle - pitchPID + rollPID - yawPID, 1000, 2000);
-  int m3 = constrain(throttle + pitchPID - rollPID - yawPID + 30, 1000, 2000); // different esc
-  int m4 = constrain(throttle + pitchPID + rollPID + yawPID, 1000, 2000);
+  if (throttle < 1200) {
+    trim = 1.015;
+  } 
+  else {
+    trim = 1.001;
+  }
+  int m1v = throttle - pitchPID - rollPID + yawPID;
+  int m2v = throttle - pitchPID + rollPID - yawPID;
+  int m3v = throttle + pitchPID - rollPID - yawPID;
+  int m4v = throttle + pitchPID + rollPID + yawPID;
+  int m1 = constrain(m1v, 1000, 2000);
+  int m2 = constrain(m2v, 1000, 2000);
+  int m3 = constrain(m3v*trim, 1000, 2000);
+  int m4 = constrain(m4v, 1000, 2000);
 
   if (!armed) m1 = m2 = m3 = m4 = 1000;
 
@@ -305,6 +325,11 @@ void loop() {
   FR.writeMicroseconds(m2);
   BL.writeMicroseconds(m3);
   BR.writeMicroseconds(m4);
+
+  batV = analogRead(A0) * (4.15/1023.0) * 3;
+
+  batV_filtered = 0.9 * batV_filtered + 0.1 * batV;
+  batV = batV_filtered;
 
   //TELEMETRY
   if (millis() - lastTelemetryTime > 20) {
@@ -318,6 +343,7 @@ void loop() {
     telemetry.m2 = m2;
     telemetry.m3 = m3;
     telemetry.m4 = m4;
+    telemetry.batV = batV;
 
     radio.writeAckPayload(0, &telemetry, sizeof(telemetry));
 
