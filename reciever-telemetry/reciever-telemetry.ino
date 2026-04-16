@@ -28,15 +28,20 @@ float rollOffset = 0;
 
 unsigned long prevTime;
 float dt;
-float alpha = 0.945;
+float alpha = 0.93;
 
 //Gyro LPF
 static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
-float gyroAlpha = 0.65;
+float gyroAlpha = 0.7;
 
 //Acc LPF
 static float accX_f = 0, accY_f = 0, accZ_f = 0;
 float accAlpha = 0.65;
+
+//MOTOR MIXING VARS
+static float m1f, m2f, m3f, m4f;
+int m1, m2, m3, m4;
+int m1v, m2v, m3v, m4v;
 
 //NRF
 RF24 radio(7, 8);
@@ -74,9 +79,9 @@ Servo FL, FR, BL, BR;
 float trim = 0;
 
 //PID
-float Kp = 1.4;
+float Kp = 1.3;
 float Ki = 0.01;
-float Kd = 0.18;
+float Kd = 0.3;
 
 float pitchError, rollError;
 float pitchPrevError = 0, rollPrevError = 0;
@@ -279,8 +284,8 @@ void loop() {
   static float pitchDerivativeFiltered = 0;
   static float rollDerivativeFiltered = 0;
 
-  pitchDerivativeFiltered = 0.8 * pitchDerivativeFiltered + 0.2 * pitchDerivative;
-  rollDerivativeFiltered  = 0.8 * rollDerivativeFiltered  + 0.2 * rollDerivative;
+  pitchDerivativeFiltered = 0.9 * pitchDerivativeFiltered + 0.1 * pitchDerivative;
+  rollDerivativeFiltered  = 0.9 * rollDerivativeFiltered  + 0.1 * rollDerivative;
 
   pitchPID = Kp * pitchError + Ki * pitchIntegral + Kd * pitchDerivativeFiltered;
   rollPID  = Kp * rollError  + Ki * rollIntegral  + Kd * rollDerivativeFiltered;
@@ -304,29 +309,28 @@ void loop() {
   yawPID   = constrain(yawPID,   -150, 150);
 
   //MIXING
-  if (throttle < 1200) {
-    trim = 1.015;
-  } 
-  else {
-    trim = 1.001;
-  }
-  int m1v = throttle - pitchPID - rollPID + yawPID;
-  int m2v = throttle - pitchPID + rollPID - yawPID;
-  int m3v = throttle + pitchPID - rollPID - yawPID;
-  int m4v = throttle + pitchPID + rollPID + yawPID;
-  int m1 = constrain(m1v, 1000, 2000);
-  int m2 = constrain(m2v, 1000, 2000);
-  int m3 = constrain(m3v*trim, 1000, 2000);
-  int m4 = constrain(m4v, 1000, 2000);
+  m1v = throttle - pitchPID - rollPID + yawPID;
+  m2v = throttle - pitchPID + rollPID - yawPID;
+  m3v = throttle + pitchPID - rollPID - yawPID;
+  m4v = throttle + pitchPID + rollPID + yawPID;
+  m1 = constrain(m1v, 1000, 2000);
+  m2 = constrain(m2v, 1000, 2000);
+  m3 = constrain(m3v, 1000, 2000);
+  m4 = constrain(m4v, 1000, 2000);
 
   if (!armed) m1 = m2 = m3 = m4 = 1000;
 
-  FL.writeMicroseconds(m1);
-  FR.writeMicroseconds(m2);
-  BL.writeMicroseconds(m3);
-  BR.writeMicroseconds(m4);
+  m1f = 0.7 * m1f + 0.3 * m1;
+  m2f = 0.7 * m2f + 0.3 * m2;
+  m3f = 0.7 * m3f + 0.3 * m3;
+  m4f = 0.7 * m4f + 0.3 * m4;
 
-  batV = analogRead(A0) * (4.15/1023.0) * 3;
+  FL.writeMicroseconds(m1f);
+  FR.writeMicroseconds(m2f);
+  BL.writeMicroseconds(m3f);
+  BR.writeMicroseconds(m4f);
+
+  batV = analogRead(A0) * (4.1/1023.0) * 3;
 
   batV_filtered = 0.9 * batV_filtered + 0.1 * batV;
   batV = batV_filtered;

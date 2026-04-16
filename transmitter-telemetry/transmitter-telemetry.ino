@@ -84,7 +84,7 @@ void loop() {
       Serial.println(telemetry.batV);
 
       lastPrint = millis();
-      if (telemetry.batV < 11.0 && success) {
+      if (telemetry.batV < 11.5 && success) {
         digitalWrite(BATLED, 1);
       } else {
         digitalWrite(BATLED, 0);
