@@ -26,6 +26,7 @@ MPU6050 imu;
 int16_t ax, ay, az, gx, gy, gz;
 float accX, accY, accZ;
 float gyroX, gyroY, gyroZ;
+float gyroX_raw, gyroY_raw, gyroZ_raw;
 
 float pitch = 0, roll = 0;
 float pitchAcc, rollAcc;
@@ -34,11 +35,11 @@ float pitchOffset = 0;
 float rollOffset = 0;
 
 float dt;
-float alpha = 0.92;
+float alpha = 0.98;
 
 //Filters
 static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
-float gyroAlpha = 0.65;
+float gyroAlpha = 0.6;
 
 static float accX_f = 0, accY_f = 0, accZ_f = 0;
 float accAlpha = 0.65;
@@ -82,9 +83,9 @@ const unsigned long FAILSAFE_TIMEOUT = 100;
 unsigned long lastTelemetryTime = 0;
 
 //PID
-float Kp = 0.6;
-float Ki = 0.005;
-float Kd = 0.09;
+float Kp = 0.7;
+float Ki = 0.02;
+float Kd = 0.18;
 
 float pitchError, rollError;
 float pitchPrevError = 0, rollPrevError = 0;
@@ -94,8 +95,8 @@ float pitchPID, rollPID;
 //YAW
 float yawRate, targetYawRate, yawPID;
 static float yawIntegral = 0;
-float KpYaw = 1.3;
-float KiYaw = 0.008;
+float KpYaw = 1.2;
+float KiYaw = 0.01;
 
 //ARMING
 bool armed = false;
@@ -188,6 +189,10 @@ void loop() {
   gyroY=gy/131.0;
   gyroZ=gz/131.0;
 
+  gyroX_raw = gyroX;
+  gyroY_raw = gyroY;
+  gyroZ_raw = gyroZ;
+
   gyroX_f = gyroAlpha * gyroX_f + (1 - gyroAlpha) * gyroX;
   gyroY_f = gyroAlpha * gyroY_f + (1 - gyroAlpha) * gyroY;
   gyroZ_f = gyroAlpha * gyroZ_f + (1 - gyroAlpha) * gyroZ;
@@ -259,34 +264,30 @@ void loop() {
   if (abs(targetRoll) < 2) targetRoll = 0;
   if (abs(targetPitch) < 2) targetPitch = 0;
 
-  pitchError = targetPitch - pitchFinal;
-  rollError  = targetRoll  - rollFinal;
+  float targetPitchRate = (targetPitch - pitchFinal) * 4;
+  float targetRollRate  = (targetRoll  - rollFinal ) * 5.8;
+
+  pitchError = targetPitchRate - gyroY_raw;
+  rollError  = targetRollRate  - gyroX_raw;
 
   if (abs(pitchError) < 1) pitchError = 0;
   if (abs(rollError) < 1) rollError = 0;
 
-  pitchIntegral += pitchError*dt;
-  rollIntegral  += rollError*dt;
+  pitchIntegral += pitchError * dt;
+  rollIntegral  += rollError  * dt;
 
   pitchIntegral = constrain(pitchIntegral, -200, 200);
-  rollIntegral = constrain(rollIntegral, -200, 200);
+  rollIntegral  = constrain(rollIntegral , -200, 200);
 
-  float pitchDerivative = (pitchError - pitchPrevError)/dt;
-  float rollDerivative = (rollError - rollPrevError)/dt;
+  float pitchD = -gyroY_raw;
+  float rollD  = -gyroX_raw;
 
-  pitchDerivative = constrain(pitchDerivative, -250, 250);
-  rollDerivative  = constrain(rollDerivative,  -250, 250);
-
-  static float dpf = 0;
-  static float rdf = 0;
-  dpf = 0.8 * dpf + 0.2 * pitchDerivative;
-  rdf = 0.8 * rdf + 0.2 * rollDerivative;
-
-  pitchPID = Kp * pitchError + Ki * pitchIntegral + Kd * dpf;
-  rollPID = Kp * rollError + Ki * rollIntegral + Kd * rdf;
+  pitchPID = Kp * pitchError + Ki * pitchIntegral + Kd * pitchD;
+  rollPID  = Kp * rollError  + Ki * rollIntegral  + Kd * rollD;
+  // rollPID  = Kp * rollError  + Ki * rollIntegral  + Kd * rollD;
 
   pitchPrevError = pitchError;
-  rollPrevError = rollError;
+  rollPrevError  = rollError;
 
   yawRate = gyroZ;
   float yawError = targetYawRate - yawRate;
@@ -302,9 +303,9 @@ void loop() {
     pitchIntegral = rollIntegral = yawIntegral = 0;
   }
 
-  pitchPID = constrain(pitchPID, -150, 150);
-  rollPID = constrain(rollPID , -150, 150);
-  yawPID = constrain(yawPID , -150, 150);
+  pitchPID = constrain(pitchPID, -100, 100);
+  rollPID = constrain(rollPID , -100, 100);
+  yawPID = constrain(yawPID , -100, 100);
 
   m1v = throttle - pitchPID - rollPID + yawPID;
   m2v = throttle - pitchPID + rollPID - yawPID;
