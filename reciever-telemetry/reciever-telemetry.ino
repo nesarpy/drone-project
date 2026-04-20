@@ -2,14 +2,19 @@
 #include <MPU6050.h>
 #include <SPI.h>
 #include <RF24.h>
-#include <Servo.h>
 
 //LED
 #define ARM_LED 2
 
 //LOOP TIMING
-#define LOOP_US 4000  // 250Hz loop rate (4ms)
+#define LOOP_US 4000
 unsigned long loopTimer = 0;
+
+// ESC PIN MASKS
+#define FL_MASK (1 << 3)  // D3 -> PD3
+#define FR_MASK (1 << 5)  // D5 -> PD5
+#define BL_MASK (1 << 6)  // D6 -> PD6
+#define BR_MASK (1 << 1)  // D9 -> PB1
 
 //BATTERY
 float batV = 0;
@@ -19,31 +24,31 @@ static float batV_filtered = 0;
 MPU6050 imu;
 
 int16_t ax, ay, az, gx, gy, gz;
-
 float accX, accY, accZ;
 float gyroX, gyroY, gyroZ;
 
 float pitch = 0, roll = 0;
 float pitchAcc, rollAcc;
 
-// Calibration offsets
 float pitchOffset = 0;
 float rollOffset = 0;
 
 float dt;
-float alpha = 0.93;
+float alpha = 0.92;
 
-//Gyro LPF
+//Filters
 static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
-float gyroAlpha = 0.7;
+float gyroAlpha = 0.65;
 
-//Acc LPF
 static float accX_f = 0, accY_f = 0, accZ_f = 0;
 float accAlpha = 0.65;
 
-//MOTOR MIXING VARS
+//Motors
 int m1, m2, m3, m4;
 int m1v, m2v, m3v, m4v;
+
+//Armed throttle
+int armedThrottle = 1100;
 
 //NRF
 RF24 radio(7, 8);
@@ -70,44 +75,38 @@ struct TelemetryPacket {
 TelemetryPacket telemetry;
 
 DataPacket data;
-DataPacket lastValidData = {512, 512, 512, 512};
+DataPacket lastValidData = {512,512,512,512};
 
 unsigned long lastReceiveTime = 0;
 const unsigned long FAILSAFE_TIMEOUT = 100;
-
 unsigned long lastTelemetryTime = 0;
 
-Servo FL, FR, BL, BR;
-float trim = 0;
-
 //PID
-float Kp = 1.3;
-float Ki = 0.01;
-float Kd = 0.3;
+float Kp = 0.6;
+float Ki = 0.005;
+float Kd = 0.09;
 
 float pitchError, rollError;
 float pitchPrevError = 0, rollPrevError = 0;
 float pitchIntegral = 0, rollIntegral = 0;
-
 float pitchPID, rollPID;
 
 //YAW
 float yawRate, targetYawRate, yawPID;
 static float yawIntegral = 0;
-float KpYaw = 1.7;
-float KiYaw = 0.005;
+float KpYaw = 1.3;
+float KiYaw = 0.008;
 
 //ARMING
 bool armed = false;
 
-//FUNCTIONS
+//check if data packet is valid
 bool isValid(DataPacket d) {
   if (d.throttle < 0 || d.throttle > 1023) return false;
   if (d.yaw < 0 || d.yaw > 1023) return false;
   if (d.pitch < 0 || d.pitch > 1023) return false;
   if (d.roll < 0 || d.roll > 1023) return false;
-  if (d.throttle == 0 && d.yaw == 0 &&
-      d.pitch == 0 && d.roll == 0) return false;
+  if (d.throttle==0 && d.yaw==0 && d.pitch==0 && d.roll==0) return false;
   return true;
 }
 
@@ -119,22 +118,26 @@ void setup() {
   Wire.setClock(400000);
   imu.initialize();
 
-  if (!imu.testConnection()) {
-    while (1);
-  }
-  
+  if (!imu.testConnection()) while(1);
+
   imu.setDLPFMode(MPU6050_DLPF_BW_42);
 
-  FL.attach(3);
-  FR.attach(5);
-  BL.attach(6);
-  BR.attach(9);
+  // Set motor pins as output
+  DDRD |= FL_MASK | FR_MASK | BL_MASK;
+  DDRB |= BR_MASK;
 
-  FL.writeMicroseconds(1000);
-  FR.writeMicroseconds(1000);
-  BL.writeMicroseconds(1000);
-  BR.writeMicroseconds(1000);
-  delay(3000);
+  // ESC init pulses
+  for (int i = 0; i < 500; i++) {
+    PORTD |= FL_MASK | FR_MASK | BL_MASK;
+    PORTB |= BR_MASK;
+
+    delayMicroseconds(1000);
+
+    PORTD &= ~(FL_MASK | FR_MASK | BL_MASK);
+    PORTB &= ~BR_MASK;
+
+    delayMicroseconds(3000);
+  }
 
   radio.begin();
   radio.setAutoAck(true);
@@ -148,7 +151,7 @@ void setup() {
   radio.startListening();
 
   float pitchSum = 0, rollSum = 0;
-  int samples = 500;
+  int samples = 1000;
 
   for (int i = 0; i < samples; i++) {
     imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
@@ -165,37 +168,30 @@ void setup() {
   pitchOffset = pitchSum / samples;
   rollOffset  = rollSum / samples;
 
-  // Start loop timer AFTER all setup is done
   loopTimer = micros();
 }
 
 void loop() {
 
-  //LOOP RATE CONTROL
-  //Wait here until exactly LOOP_US microseconds have passed since last iteration.
-  //This makes dt constant and predictable regardless of code execution time.
   while (micros() - loopTimer < LOOP_US);
   loopTimer = micros();
 
-  dt = LOOP_US / 1000000.0;  // = 0.004 seconds
+  dt = LOOP_US / 1000000.0;
 
-  //MPU
   imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  accX = ax / 16384.0;
-  accY = ay / 16384.0;
-  accZ = az / 16384.0;
+  accX=ax/16384.0;
+  accY=ay/16384.0;
+  accZ=az/16384.0;
+  
+  gyroX=gx/131.0;
+  gyroY=gy/131.0;
+  gyroZ=gz/131.0;
 
-  gyroX = gx / 131.0;
-  gyroY = gy / 131.0;
-  gyroZ = gz / 131.0;
-
-  //Gyro LPF
   gyroX_f = gyroAlpha * gyroX_f + (1 - gyroAlpha) * gyroX;
   gyroY_f = gyroAlpha * gyroY_f + (1 - gyroAlpha) * gyroY;
   gyroZ_f = gyroAlpha * gyroZ_f + (1 - gyroAlpha) * gyroZ;
 
-  //Acc LPF
   accX_f = accAlpha * accX_f + (1 - accAlpha) * accX;
   accY_f = accAlpha * accY_f + (1 - accAlpha) * accY;
   accZ_f = accAlpha * accZ_f + (1 - accAlpha) * accZ;
@@ -208,21 +204,20 @@ void loop() {
   accY = accY_f;
   accZ = accZ_f;
 
-  pitchAcc = atan2(-accX, accZ) * 180 / PI;
-  rollAcc  = atan2(-accY, accZ) * 180 / PI;
+  pitchAcc = atan2(-accX,accZ) * 180/PI;
+  rollAcc = atan2(-accY,accZ) * 180/PI;
 
-  if (abs(pitchAcc) > 45 || abs(rollAcc) > 45) {
+  if(abs(pitchAcc)>45||abs(rollAcc)>45){
     pitchAcc = pitch;
-    rollAcc  = roll;
+    rollAcc = roll;
   }
 
   pitch = alpha * (pitch + gyroY * dt) + (1 - alpha) * pitchAcc;
-  roll  = alpha * (roll  + gyroX * dt) + (1 - alpha) * rollAcc;
+  roll  = alpha * (roll + gyroX * dt) + (1 - alpha) * rollAcc;
 
   float pitchFinal = pitch - pitchOffset;
-  float rollFinal  = roll  - rollOffset;
+  float rollFinal  = roll - rollOffset;
 
-  //NRF RECEIVE
   if (radio.available()) {
     radio.read(&data, sizeof(data));
     if (isValid(data)) {
@@ -231,12 +226,11 @@ void loop() {
     }
   }
 
-  if (millis() - lastReceiveTime > FAILSAFE_TIMEOUT) {
-    lastValidData = {0, 512, 512, 512};
+  if (millis() - lastReceiveTime > FAILSAFE_TIMEOUT){
+    lastValidData={0, 512, 512, 512};
   }
 
-  //ARMING
-  static unsigned long armStartTime = 0;
+  static unsigned long armStartTime=0;
 
   if (lastValidData.throttle < 50 && lastValidData.yaw > 900) {
     if (armStartTime == 0) armStartTime = millis();
@@ -253,70 +247,70 @@ void loop() {
     yawIntegral = 0;
   }
 
-  digitalWrite(ARM_LED, armed ? HIGH : LOW);
+  digitalWrite(ARM_LED, armed);
 
-  //INPUT
-  int throttle = map(lastValidData.throttle, 0, 1023, 1000, 2000);
-  if (armed && throttle < 1070) throttle = 1070;
+  int throttle = map(lastValidData.throttle,0,1023,1000,2000);
+  if(armed && throttle < armedThrottle) throttle = armedThrottle;
 
-  float targetPitch = map(lastValidData.pitch, 0, 1023, -30, 30);
-  float targetRoll = map(lastValidData.roll, 0, 1023, -30, 30);
+  int targetPitch = map(lastValidData.pitch, 0, 1023, -30, 30);
+  int targetRoll  = -map(lastValidData.roll , 0, 1023, -30, 30);
   targetYawRate = map(lastValidData.yaw, 0, 1023, -150, 150);
 
-  if (abs(targetRoll) < 2) targetRoll  = 0;
+  if (abs(targetRoll) < 2) targetRoll = 0;
   if (abs(targetPitch) < 2) targetPitch = 0;
 
-  //PID
   pitchError = targetPitch - pitchFinal;
   rollError  = targetRoll  - rollFinal;
 
   if (abs(pitchError) < 1) pitchError = 0;
-  if (abs(rollError)  < 1) rollError  = 0;
+  if (abs(rollError) < 1) rollError = 0;
 
-  pitchIntegral += pitchError * dt;
-  rollIntegral  += rollError  * dt;
+  pitchIntegral += pitchError*dt;
+  rollIntegral  += rollError*dt;
 
   pitchIntegral = constrain(pitchIntegral, -200, 200);
-  rollIntegral  = constrain(rollIntegral,  -200, 200);
+  rollIntegral = constrain(rollIntegral, -200, 200);
 
-  float pitchDerivative = (pitchError - pitchPrevError) / dt;
-  float rollDerivative  = (rollError  - rollPrevError)  / dt;
+  float pitchDerivative = (pitchError - pitchPrevError)/dt;
+  float rollDerivative = (rollError - rollPrevError)/dt;
 
-  static float pitchDerivativeFiltered = 0;
-  static float rollDerivativeFiltered = 0;
+  pitchDerivative = constrain(pitchDerivative, -250, 250);
+  rollDerivative  = constrain(rollDerivative,  -250, 250);
 
-  pitchDerivativeFiltered = 0.9 * pitchDerivativeFiltered + 0.1 * pitchDerivative;
-  rollDerivativeFiltered  = 0.9 * rollDerivativeFiltered  + 0.1 * rollDerivative;
+  static float dpf = 0;
+  static float rdf = 0;
+  dpf = 0.8 * dpf + 0.2 * pitchDerivative;
+  rdf = 0.8 * rdf + 0.2 * rollDerivative;
 
-  pitchPID = Kp * pitchError + Ki * pitchIntegral + Kd * pitchDerivativeFiltered;
-  rollPID  = Kp * rollError  + Ki * rollIntegral  + Kd * rollDerivativeFiltered;
+  pitchPID = Kp * pitchError + Ki * pitchIntegral + Kd * dpf;
+  rollPID = Kp * rollError + Ki * rollIntegral + Kd * rdf;
 
   pitchPrevError = pitchError;
-  rollPrevError  = rollError;
+  rollPrevError = rollError;
 
-  //YAW
   yawRate = gyroZ;
   float yawError = targetYawRate - yawRate;
-  if (abs(yawError) < 5) yawError = 0;
+  if (abs(yawError)<5) yawError = 0;
+
   yawIntegral += yawError * dt;
   yawIntegral = constrain(yawIntegral, -50, 50);
+
   yawPID = KpYaw * yawError + KiYaw * yawIntegral;
 
-  if (throttle <= 1070) {
+  if(throttle <= armedThrottle){
     pitchPID = rollPID = yawPID = 0;
-    pitchIntegral = rollIntegral = 0;
-    yawIntegral = 0;
+    pitchIntegral = rollIntegral = yawIntegral = 0;
   }
 
-  pitchPID = constrain(pitchPID, -200, 200);
-  rollPID = constrain(rollPID, -200, 200);
-  yawPID = constrain(yawPID, -150, 150);
+  pitchPID = constrain(pitchPID, -150, 150);
+  rollPID = constrain(rollPID , -150, 150);
+  yawPID = constrain(yawPID , -150, 150);
 
-  //MIXING
   m1v = throttle - pitchPID - rollPID + yawPID;
   m2v = throttle - pitchPID + rollPID - yawPID;
   m3v = throttle + pitchPID - rollPID - yawPID;
   m4v = throttle + pitchPID + rollPID + yawPID;
+
   m1 = constrain(m1v, 1000, 2000);
   m2 = constrain(m2v, 1000, 2000);
   m3 = constrain(m3v, 1000, 2000);
@@ -324,12 +318,29 @@ void loop() {
 
   if (!armed) m1 = m2 = m3 = m4 = 1000;
 
-  FL.writeMicroseconds(m1);
-  FR.writeMicroseconds(m2);
-  BL.writeMicroseconds(m3);
-  BR.writeMicroseconds(m4);
+  // Generating port PWM signals
+  unsigned long start = micros();
 
-  batV = analogRead(A0) * (4.1 / 1023.0) * 3;
+  PORTD |= FL_MASK | FR_MASK | BL_MASK;
+  PORTB |= BR_MASK;
+
+  unsigned long t1 = start + m1;
+  unsigned long t2 = start + m2;
+  unsigned long t3 = start + m3;
+  unsigned long t4 = start + m4;
+
+  bool fl = 1,fr = 1,bl = 1,br = 1;
+
+  while(fl||fr||bl||br){
+    unsigned long now=micros();
+
+    if(fl && now >= t1){PORTD&=~FL_MASK; fl = 0; }
+    if(fr && now >= t2){PORTD&=~FR_MASK; fr = 0; }
+    if(bl && now >= t3){PORTD&=~BL_MASK; bl = 0; }
+    if(br && now >= t4){PORTB&=~BR_MASK; br = 0; }
+  }
+
+  batV = analogRead(A0) * (4.1/1023.0) * 3;
   batV_filtered = 0.9 * batV_filtered + 0.1 * batV;
   batV = batV_filtered;
 
@@ -345,7 +356,7 @@ void loop() {
     telemetry.m3 = m3;
     telemetry.m4 = m4;
     telemetry.batV = batV;
-
+    
     radio.writeAckPayload(0, &telemetry, sizeof(telemetry));
     lastTelemetryTime = millis();
   }
