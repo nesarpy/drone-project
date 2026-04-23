@@ -3,61 +3,32 @@
 #include <SPI.h>
 #include <RF24.h>
 
-//LED
+// ─────────────────────────────────────────────
+// PINS
+// ─────────────────────────────────────────────
 #define ARM_LED 2
 
-//LOOP TIMING
+#define FL_MASK (1 << 3)
+#define FR_MASK (1 << 5)
+#define BL_MASK (1 << 6)
+#define BR_MASK (1 << 1)
+
+#define BATTERY_PIN A0
+
+// ─────────────────────────────────────────────
+// LOOP
+// ─────────────────────────────────────────────
 #define LOOP_US 4000
-unsigned long loopTimer = 0;
 
-// ESC PIN MASKS
-#define FL_MASK (1 << 3)  // D3 -> PD3
-#define FR_MASK (1 << 5)  // D5 -> PD5
-#define BL_MASK (1 << 6)  // D6 -> PD6
-#define BR_MASK (1 << 1)  // D9 -> PB1
-
-//BATTERY
-float batV = 0;
-static float batV_filtered = 0;
-
-//MPU
-MPU6050 imu;
-
-int16_t ax, ay, az, gx, gy, gz;
-float accX, accY, accZ;
-float gyroX, gyroY, gyroZ;
-
-// FILTERS
-static float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
-float gyroAlpha = 0.6;
-
-static float accX_f = 0, accY_f = 0, accZ_f = 0;
-float accAlpha = 0.65;
-
-// ANGLES
-float pitch = 0, roll = 0;
-float pitchAcc, rollAcc;
-float pitchOffset = 0, rollOffset = 0;
-float alpha = 0.93;
-
-// MOTORS
-int m1, m2, m3, m4;
-int m1v, m2v, m3v, m4v;
-
-// ARM
-bool armed = false;
-int armedThrottle = 1100;
-
+// ─────────────────────────────────────────────
 // RADIO
+// ─────────────────────────────────────────────
 RF24 radio(7, 8);
 const byte txAddress[6] = "00001";
 const byte rxAddress[6] = "00002";
 
-struct DataPacket {
-  int16_t throttle;
-  int16_t yaw;
-  int16_t pitch;
-  int16_t roll;
+struct ControlPacket {
+  int16_t throttle, yaw, pitch, roll;
 };
 
 struct TelemetryPacket {
@@ -70,34 +41,76 @@ struct TelemetryPacket {
   float batV;
 };
 
+ControlPacket data;
+ControlPacket lastValidData = {512,512,512,512};
 TelemetryPacket telemetry;
 
-DataPacket data;
-DataPacket lastValidData = {512,512,512,512};
-
 unsigned long lastReceiveTime = 0;
-const unsigned long FAILSAFE_TIMEOUT = 100;
 unsigned long lastTelemetryTime = 0;
+const unsigned long FAILSAFE_TIMEOUT = 100;
 
+// ─────────────────────────────────────────────
+// IMU
+// ─────────────────────────────────────────────
+MPU6050 imu;
+
+int16_t ax, ay, az, gx, gy, gz;
+
+float gyroX, gyroY, gyroZ;
+float accX, accY, accZ;
+
+float gyroX_f = 0, gyroY_f = 0, gyroZ_f = 0;
+float accX_f = 0, accY_f = 0, accZ_f = 0;
+
+float gyroAlpha = 0.6;
+float accAlpha  = 0.65;
+
+float pitch = 0, roll = 0;
+float pitchAcc, rollAcc;
+
+float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
+
+float pitchOffset = 0, rollOffset = 0;
+float alpha = 0.93;
+
+// ─────────────────────────────────────────────
 // PID
+// ─────────────────────────────────────────────
 float Kp = 0.75;
-float Ki = 0.015;
+float Ki = 0;
 float Kd = 0.08;
 
 float rollSetpoint, pitchSetpoint, yawSetpoint;
 
 float rollError, pitchError;
-float rollI = 0, pitchI = 0;
+float rollIntegral = 0, pitchIntegral = 0;
 float rollLastError = 0, pitchLastError = 0;
 
 float rollPID, pitchPID;
 
-float yawI = 0, yawPID;
+float yawIntegral = 0, yawPID;
 float KpYaw = 1.2;
 float KiYaw = 0.01;
 
+// ─────────────────────────────────────────────
+// MOTORS
+// ─────────────────────────────────────────────
+int m1, m2, m3, m4;
+int m1v, m2v, m3v, m4v;
+
+bool armed = false;
+const int MOTOR_IDLE = 1100;
+
+// ─────────────────────────────────────────────
+// BATTERY
+// ─────────────────────────────────────────────
+float batV = 0;
+float batV_filtered = 0;
+
+// ─────────────────────────────────────────────
 // VALIDATION
-bool isValid(DataPacket d) {
+// ─────────────────────────────────────────────
+bool isValid(ControlPacket d) {
   if (d.throttle < 0 || d.throttle > 1023) return false;
   if (d.yaw < 0 || d.yaw > 1023) return false;
   if (d.pitch < 0 || d.pitch > 1023) return false;
@@ -106,6 +119,9 @@ bool isValid(DataPacket d) {
   return true;
 }
 
+// ─────────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────────
 void setup() {
 
   pinMode(ARM_LED, OUTPUT);
@@ -118,20 +134,17 @@ void setup() {
   DDRD |= FL_MASK | FR_MASK | BL_MASK;
   DDRB |= BR_MASK;
 
-  // ESC INIT
+  // ESC warmup
   for (int i = 0; i < 500; i++) {
     PORTD |= FL_MASK | FR_MASK | BL_MASK;
     PORTB |= BR_MASK;
-
     delayMicroseconds(1000);
-
     PORTD &= ~(FL_MASK | FR_MASK | BL_MASK);
     PORTB &= ~BR_MASK;
-
     delayMicroseconds(3000);
   }
 
-  // RADIO (UNCHANGED)
+  // RADIO (EXACT SAME)
   radio.begin();
   radio.setAutoAck(true);
   radio.openReadingPipe(0, txAddress);
@@ -145,23 +158,37 @@ void setup() {
 
   // CALIBRATION
   float ps = 0, rs = 0;
+  float gxs = 0, gys = 0, gzs = 0;
+
   for (int i = 0; i < 1000; i++) {
     imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
     accX = ax / 16384.0;
     accY = ay / 16384.0;
     accZ = az / 16384.0;
 
     ps += atan2(-accX, accZ) * 180 / PI;
     rs += atan2(-accY, accZ) * 180 / PI;
+
+    gxs += gx;
+    gys += gy;
+    gzs += gz;
+
     delay(5);
   }
 
   pitchOffset = ps / 1000;
   rollOffset  = rs / 1000;
 
-  loopTimer = micros();
+  // gyro offsets (convert to deg/s like runtime)
+  gyroX_offset = (gxs / 1000.0) / 131.0;
+  gyroY_offset = (gys / 1000.0) / 131.0;
+  gyroZ_offset = (gzs / 1000.0) / 131.0;
 }
 
+// ─────────────────────────────────────────────
+// LOOP
+// ─────────────────────────────────────────────
 void loop() {
 
   unsigned long start = micros();
@@ -169,15 +196,14 @@ void loop() {
   // ===== IMU =====
   imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  gyroX = gx / 131.0;
-  gyroY = gy / 131.0;
-  gyroZ = gz / 131.0;
+  gyroX = gx / 131.0 - gyroX_offset;
+  gyroY = gy / 131.0 - gyroY_offset;
+  gyroZ = gz / 131.0 - gyroZ_offset;
 
   accX = ax / 16384.0;
   accY = ay / 16384.0;
   accZ = az / 16384.0;
 
-  // FILTERS
   gyroX_f = gyroAlpha * gyroX_f + (1 - gyroAlpha) * gyroX;
   gyroY_f = gyroAlpha * gyroY_f + (1 - gyroAlpha) * gyroY;
   gyroZ_f = gyroAlpha * gyroZ_f + (1 - gyroAlpha) * gyroZ;
@@ -194,7 +220,6 @@ void loop() {
   accY = accY_f;
   accZ = accZ_f;
 
-  // ANGLES
   pitchAcc = atan2(-accX, accZ) * 180 / PI;
   rollAcc  = atan2(-accY, accZ) * 180 / PI;
 
@@ -204,7 +229,7 @@ void loop() {
   float pitchFinal = pitch - pitchOffset;
   float rollFinal  = roll  - rollOffset;
 
-  // RADIO
+  // ===== RADIO (UNCHANGED) =====
   if (radio.available()) {
     radio.read(&data, sizeof(data));
     if (isValid(data)) {
@@ -220,31 +245,22 @@ void loop() {
   // ===== ARMING =====
   static unsigned long armStartTime = 0;
 
-  // ARM
   if (lastValidData.throttle < 50 && lastValidData.yaw > 900) {
-    if (armStartTime == 0) {
-      armStartTime = millis();
-    }
-    if (millis() - armStartTime > 1000) {
-      armed = true;
-    }
+    if (armStartTime == 0) armStartTime = millis();
+    if (millis() - armStartTime > 1000) armed = true;
   } else {
     armStartTime = 0;
   }
 
-  // DISARM
   if (lastValidData.throttle < 50 && lastValidData.yaw < 100) {
     armed = false;
-    rollI = 0;
-    pitchI = 0;
-    yawI = 0;
+    rollIntegral = pitchIntegral = yawIntegral = 0;
   }
 
   digitalWrite(ARM_LED, armed);
 
   // INPUT
   int throttle = map(lastValidData.throttle, 0, 1023, 1000, 2000);
-  if (armed && throttle < armedThrottle) throttle = armedThrottle;
 
   int rollInput  = -(lastValidData.roll - 512);
   int pitchInput = lastValidData.pitch - 512;
@@ -254,7 +270,6 @@ void loop() {
   if (abs(pitchInput) < 20) pitchInput = 0;
   if (abs(yawInput) < 20) yawInput = 0;
 
-  // SETPOINT
   rollSetpoint  = rollInput * 0.4;
   pitchSetpoint = pitchInput * 0.4;
   yawSetpoint   = yawInput * 0.5;
@@ -266,36 +281,37 @@ void loop() {
   rollError  = gyroX - rollSetpoint;
   pitchError = gyroY - pitchSetpoint;
 
-  rollI  += rollError;
-  pitchI += pitchError;
+  rollIntegral  = constrain(rollIntegral  + rollError,  -200, 200);
+  pitchIntegral = constrain(pitchIntegral + pitchError, -200, 200);
 
-  rollI  = constrain(rollI, -200, 200);
-  pitchI = constrain(pitchI, -200, 200);
-
-  rollPID  = -(Kp * rollError  + Ki * rollI  + Kd * (rollError  - rollLastError));
-  pitchPID = -(Kp * pitchError + Ki * pitchI + Kd * (pitchError - pitchLastError));
+  rollPID  = -(Kp * rollError  + Ki * rollIntegral  + Kd * (rollError  - rollLastError));
+  pitchPID = -(Kp * pitchError + Ki * pitchIntegral + Kd * (pitchError - pitchLastError));
 
   rollLastError  = rollError;
   pitchLastError = pitchError;
 
-  // YAW
   float yawError = gyroZ - yawSetpoint;
-  yawI += yawError;
-  yawI = constrain(yawI, -150, 150);
-  yawPID = KpYaw * yawError + KiYaw * yawI;
+  yawIntegral = constrain(yawIntegral + yawError, -150, 150);
+  yawPID = KpYaw * yawError + KiYaw * yawIntegral;
 
-  // MOTOR MIX
-  m1v = throttle - pitchPID - rollPID + yawPID;
-  m2v = throttle - pitchPID + rollPID - yawPID;
-  m3v = throttle + pitchPID - rollPID - yawPID;
-  m4v = throttle + pitchPID + rollPID + yawPID;
+  // MOTOR LOGIC
+  if (!armed) {
+    m1 = m2 = m3 = m4 = 1000;
+  } 
+  else if (throttle < 1100) {
+    m1 = m2 = m3 = m4 = MOTOR_IDLE;
+  } 
+  else {
+    m1v = throttle - pitchPID - rollPID + yawPID;
+    m2v = throttle - pitchPID + rollPID - yawPID;
+    m3v = throttle + pitchPID - rollPID - yawPID;
+    m4v = throttle + pitchPID + rollPID + yawPID;
 
-  m1 = constrain(m1v, 1000, 2000);
-  m2 = constrain(m2v, 1000, 2000);
-  m3 = constrain(m3v, 1000, 2000);
-  m4 = constrain(m4v, 1000, 2000);
-
-  if (!armed) m1 = m2 = m3 = m4 = 1000;
+    m1 = constrain(m1v, MOTOR_IDLE, 2000);
+    m2 = constrain(m2v, MOTOR_IDLE, 2000);
+    m3 = constrain(m3v, MOTOR_IDLE, 2000);
+    m4 = constrain(m4v, MOTOR_IDLE, 2000);
+  }
 
   // PWM
   unsigned long pwmStart = micros();
