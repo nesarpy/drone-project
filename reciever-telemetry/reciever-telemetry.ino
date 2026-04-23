@@ -2,23 +2,24 @@
 #include <MPU6050.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <Servo.h>
 
 // ─────────────────────────────────────────────
 // PINS
 // ─────────────────────────────────────────────
 #define ARM_LED 2
 
-#define FL_MASK (1 << 3)
-#define FR_MASK (1 << 5)
-#define BL_MASK (1 << 6)
-#define BR_MASK (1 << 1)
+#define FL_PIN 3
+#define FR_PIN 5
+#define BL_PIN 6
+#define BR_PIN 4
 
 #define BATTERY_PIN A0
 
 // ─────────────────────────────────────────────
 // LOOP
 // ─────────────────────────────────────────────
-#define LOOP_US 4000
+#define LOOP_US 5000
 
 // ─────────────────────────────────────────────
 // RADIO
@@ -76,9 +77,9 @@ float alpha = 0.93;
 // ─────────────────────────────────────────────
 // PID
 // ─────────────────────────────────────────────
-float Kp = 0.75;
-float Ki = 0;
-float Kd = 0.08;
+float Kp = 0.8;
+float Ki = 0.001;
+float Kd = 0.1;
 
 float rollSetpoint, pitchSetpoint, yawSetpoint;
 
@@ -87,16 +88,19 @@ float rollIntegral = 0, pitchIntegral = 0;
 float rollLastError = 0, pitchLastError = 0;
 
 float rollPID, pitchPID;
+float rollDerivative;
 
 float yawIntegral = 0, yawPID;
-float KpYaw = 1.2;
-float KiYaw = 0.01;
+float KpYaw = 0.5;
+float KiYaw = 0.001;
 
 // ─────────────────────────────────────────────
 // MOTORS
 // ─────────────────────────────────────────────
 int m1, m2, m3, m4;
 int m1v, m2v, m3v, m4v;
+
+Servo m1_servo, m2_servo, m3_servo, m4_servo;
 
 bool armed = false;
 const int MOTOR_IDLE = 1100;
@@ -131,19 +135,21 @@ void setup() {
   imu.initialize();
   imu.setDLPFMode(MPU6050_DLPF_BW_42);
 
-  DDRD |= FL_MASK | FR_MASK | BL_MASK;
-  DDRB |= BR_MASK;
+  // Attach ESCs
+  m1_servo.attach(FL_PIN);
+  m2_servo.attach(FR_PIN);
+  m3_servo.attach(BL_PIN);
+  m4_servo.attach(BR_PIN);
 
-  // ESC warmup
-  for (int i = 0; i < 500; i++) {
-    PORTD |= FL_MASK | FR_MASK | BL_MASK;
-    PORTB |= BR_MASK;
-    delayMicroseconds(1000);
-    PORTD &= ~(FL_MASK | FR_MASK | BL_MASK);
-    PORTB &= ~BR_MASK;
-    delayMicroseconds(3000);
+  for (int i = 0; i < 200; i++) {
+    m1_servo.writeMicroseconds(1000);
+    m2_servo.writeMicroseconds(1000);
+    m3_servo.writeMicroseconds(1000);
+    m4_servo.writeMicroseconds(1000);
+    delay(10);
   }
-
+  delay(500);
+  
   // RADIO (EXACT SAME)
   radio.begin();
   radio.setAutoAck(true);
@@ -180,7 +186,6 @@ void setup() {
   pitchOffset = ps / 1000;
   rollOffset  = rs / 1000;
 
-  // gyro offsets (convert to deg/s like runtime)
   gyroX_offset = (gxs / 1000.0) / 131.0;
   gyroY_offset = (gys / 1000.0) / 131.0;
   gyroZ_offset = (gzs / 1000.0) / 131.0;
@@ -191,9 +196,15 @@ void setup() {
 // ─────────────────────────────────────────────
 void loop() {
 
-  unsigned long start = micros();
+  static unsigned long lastLoopTime = 0;
 
-  // ===== IMU =====
+  unsigned long now = micros();
+
+  if (now - lastLoopTime < LOOP_US) return;
+
+  float dt = (now - lastLoopTime) / 1000000.0;
+  lastLoopTime = now;
+
   imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
   gyroX = gx / 131.0 - gyroX_offset;
@@ -204,32 +215,15 @@ void loop() {
   accY = ay / 16384.0;
   accZ = az / 16384.0;
 
-  gyroX_f = gyroAlpha * gyroX_f + (1 - gyroAlpha) * gyroX;
-  gyroY_f = gyroAlpha * gyroY_f + (1 - gyroAlpha) * gyroY;
-  gyroZ_f = gyroAlpha * gyroZ_f + (1 - gyroAlpha) * gyroZ;
-
-  accX_f = accAlpha * accX_f + (1 - accAlpha) * accX;
-  accY_f = accAlpha * accY_f + (1 - accAlpha) * accY;
-  accZ_f = accAlpha * accZ_f + (1 - accAlpha) * accZ;
-
-  gyroX = gyroX_f;
-  gyroY = gyroY_f;
-  gyroZ = gyroZ_f;
-
-  accX = accX_f;
-  accY = accY_f;
-  accZ = accZ_f;
-
   pitchAcc = atan2(-accX, accZ) * 180 / PI;
   rollAcc  = atan2(-accY, accZ) * 180 / PI;
 
-  pitch = alpha * (pitch + gyroY * 0.004) + (1 - alpha) * pitchAcc;
-  roll  = alpha * (roll  + gyroX * 0.004) + (1 - alpha) * rollAcc;
+  pitch = alpha * (pitch + gyroY * dt) + (1 - alpha) * pitchAcc;
+  roll  = alpha * (roll  + gyroX * dt) + (1 - alpha) * rollAcc;
 
   float pitchFinal = pitch - pitchOffset;
   float rollFinal  = roll  - rollOffset;
 
-  // ===== RADIO (UNCHANGED) =====
   if (radio.available()) {
     radio.read(&data, sizeof(data));
     if (isValid(data)) {
@@ -242,7 +236,6 @@ void loop() {
     lastValidData = {0, 512, 512, 512};
   }
 
-  // ===== ARMING =====
   static unsigned long armStartTime = 0;
 
   if (lastValidData.throttle < 50 && lastValidData.yaw > 900) {
@@ -259,7 +252,6 @@ void loop() {
 
   digitalWrite(ARM_LED, armed);
 
-  // INPUT
   int throttle = map(lastValidData.throttle, 0, 1023, 1000, 2000);
 
   int rollInput  = -(lastValidData.roll - 512);
@@ -270,35 +262,41 @@ void loop() {
   if (abs(pitchInput) < 20) pitchInput = 0;
   if (abs(yawInput) < 20) yawInput = 0;
 
-  rollSetpoint  = rollInput * 0.4;
-  pitchSetpoint = pitchInput * 0.4;
-  yawSetpoint   = yawInput * 0.5;
+  float angleKp = 3.0;
 
-  rollSetpoint  -= rollFinal * 2.0;
-  pitchSetpoint -= pitchFinal * 2.0;
+  float rollAngleSetpoint  = rollInput * 0.1;
+  float pitchAngleSetpoint = pitchInput * 0.1;
 
-  // PID
+  float rollAngleError  = rollAngleSetpoint  - rollFinal;
+  float pitchAngleError = pitchAngleSetpoint - pitchFinal;
+
+  rollSetpoint  = angleKp * rollAngleError;
+  pitchSetpoint = angleKp * pitchAngleError;
+  yawSetpoint = yawInput * 0.5;
+
   rollError  = gyroX - rollSetpoint;
   pitchError = gyroY - pitchSetpoint;
 
-  rollIntegral  = constrain(rollIntegral  + rollError,  -200, 200);
-  pitchIntegral = constrain(pitchIntegral + pitchError, -200, 200);
+  rollIntegral  = constrain(rollIntegral  + rollError * dt,  -200, 200);
+  pitchIntegral = constrain(pitchIntegral + pitchError * dt, -200, 200);
 
-  rollPID  = -(Kp * rollError  + Ki * rollIntegral  + Kd * (rollError  - rollLastError));
-  pitchPID = -(Kp * pitchError + Ki * pitchIntegral + Kd * (pitchError - pitchLastError));
+  rollDerivative = (rollError - rollLastError) / dt;
+  rollDerivative = constrain(rollDerivative, -200, 200);
+
+  rollPID  = -(Kp * rollError  + Ki * rollIntegral  + Kd * rollDerivative);
+  pitchPID = -(Kp * pitchError + Ki * pitchIntegral + Kd * (pitchError - pitchLastError) / dt);
 
   rollLastError  = rollError;
   pitchLastError = pitchError;
 
   float yawError = gyroZ - yawSetpoint;
-  yawIntegral = constrain(yawIntegral + yawError, -150, 150);
+  yawIntegral = constrain(yawIntegral + yawError * dt, -150, 150);
   yawPID = KpYaw * yawError + KiYaw * yawIntegral;
 
-  // MOTOR LOGIC
   if (!armed) {
     m1 = m2 = m3 = m4 = 1000;
   } 
-  else if (throttle < 1100) {
+  else if (throttle < MOTOR_IDLE) {
     m1 = m2 = m3 = m4 = MOTOR_IDLE;
   } 
   else {
@@ -307,40 +305,21 @@ void loop() {
     m3v = throttle + pitchPID - rollPID - yawPID;
     m4v = throttle + pitchPID + rollPID + yawPID;
 
-    m1 = constrain(m1v, MOTOR_IDLE, 2000);
-    m2 = constrain(m2v, MOTOR_IDLE, 2000);
-    m3 = constrain(m3v, MOTOR_IDLE, 2000);
-    m4 = constrain(m4v, MOTOR_IDLE, 2000);
+    m1 = constrain(m1v, 1000, 2000);
+    m2 = constrain(m2v*0.99, 1000, 2000);
+    m3 = constrain(m3v*1.012, 1000, 2000);
+    m4 = constrain(m4v, 1000, 2000);
   }
 
-  // PWM
-  unsigned long pwmStart = micros();
+  m1_servo.writeMicroseconds(m1);
+  m2_servo.writeMicroseconds(m2);
+  m3_servo.writeMicroseconds(m3);
+  m4_servo.writeMicroseconds(m4);
 
-  PORTD |= FL_MASK | FR_MASK | BL_MASK;
-  PORTB |= BR_MASK;
-
-  unsigned long t1 = pwmStart + m1;
-  unsigned long t2 = pwmStart + m2;
-  unsigned long t3 = pwmStart + m3;
-  unsigned long t4 = pwmStart + m4;
-
-  bool fl = 1, fr = 1, bl = 1, br = 1;
-
-  while (fl || fr || bl || br) {
-    unsigned long now = micros();
-
-    if (fl && now >= t1) { PORTD &= ~FL_MASK; fl = 0; }
-    if (fr && now >= t2) { PORTD &= ~FR_MASK; fr = 0; }
-    if (bl && now >= t3) { PORTD &= ~BL_MASK; bl = 0; }
-    if (br && now >= t4) { PORTB &= ~BR_MASK; br = 0; }
-  }
-
-  // BATTERY
-  batV = analogRead(A0) * (4.1 / 1023.0) * 3;
+  batV = analogRead(A0) * (5.1 / 1023.0) * 3;
   batV_filtered = 0.9 * batV_filtered + 0.1 * batV;
   batV = batV_filtered;
 
-  // TELEMETRY (UNCHANGED)
   if (millis() - lastTelemetryTime > 20) {
     telemetry.armed = armed;
     telemetry.throttle = throttle;
@@ -356,7 +335,4 @@ void loop() {
     radio.writeAckPayload(0, &telemetry, sizeof(telemetry));
     lastTelemetryTime = millis();
   }
-
-  // LOOP TIMING
-  while (micros() - start < LOOP_US);
 }
